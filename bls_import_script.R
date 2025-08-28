@@ -1,5 +1,5 @@
-# BLS OEWS Data Import Script
-# This script unzips BLS OEWS data files (1997-2024) and imports them into a SQL database
+# BLS OEWS Data Import Script - Excel Files Version
+# This script imports BLS OEWS Excel data files (1997-2024) into a SQL database
 
 # Load required libraries
 library(DBI)
@@ -174,11 +174,11 @@ standardize_columns <- function(df, year) {
   
   # Ensure all expected columns exist (add with NA if missing)
   expected_cols <- c("area", "area_title", "naics", "naics_title", "i_group", 
-                    "own_code", "occ_code", "occ_title", "o_group", "tot_emp",
-                    "emp_prse", "jobs_1000", "jobs_1000_prse", "h_mean", "a_mean",
-                    "mean_prse", "h_pct10", "h_pct25", "h_median", "h_pct75",
-                    "h_pct90", "a_pct10", "a_pct25", "a_median", "a_pct75",
-                    "a_pct90", "annual", "hourly", "year")
+                     "own_code", "occ_code", "occ_title", "o_group", "tot_emp",
+                     "emp_prse", "jobs_1000", "jobs_1000_prse", "h_mean", "a_mean",
+                     "mean_prse", "h_pct10", "h_pct25", "h_median", "h_pct75",
+                     "h_pct90", "a_pct10", "a_pct25", "a_median", "a_pct75",
+                     "a_pct90", "annual", "hourly", "year")
   
   for (col in expected_cols) {
     if (!col %in% names(df)) {
@@ -192,102 +192,154 @@ standardize_columns <- function(df, year) {
   return(df)
 }
 
-# Function to process a single year's data
-process_year_data <- function(zip_file, year, con) {
-  message(paste("Processing year:", year))
-  
-  # Create temporary directory for extraction
-  temp_dir <- file.path(tempdir(), paste0("oews_", year))
-  if (dir.exists(temp_dir)) {
-    unlink(temp_dir, recursive = TRUE)
+# Function to extract year from filename
+extract_year_from_filename <- function(filename) {
+  # Try to extract 4-digit year from filename
+  year_match <- str_extract(basename(filename), "\\d{4}")
+  if (!is.na(year_match)) {
+    return(as.numeric(year_match))
   }
-  dir.create(temp_dir, recursive = TRUE)
+  
+  # Alternative patterns for year extraction
+  # Look for patterns like "oes_19m3" (for 2019), "oesm20all" (for 2020), etc.
+  alt_patterns <- c(
+    "oes_(\\d{2})", # oes_19 -> 2019
+    "oesm(\\d{2})", # oesm20 -> 2020
+    "oes(\\d{2})"   # oes19 -> 2019
+  )
+  
+  for (pattern in alt_patterns) {
+    match <- str_match(tolower(basename(filename)), pattern)
+    if (!is.na(match[1,2])) {
+      two_digit_year <- as.numeric(match[1,2])
+      # Convert 2-digit year to 4-digit (assuming 97-99 = 1997-1999, 00-24 = 2000-2024)
+      if (two_digit_year >= 97) {
+        return(1900 + two_digit_year)
+      } else {
+        return(2000 + two_digit_year)
+      }
+    }
+  }
+  
+  return(NA)
+}
+
+# Function to process a single Excel file
+process_excel_file <- function(excel_file, year, con) {
+  message(paste("Processing file:", basename(excel_file), "for year:", year))
   
   tryCatch({
-    # Unzip the file
-    unzip(zip_file, exdir = temp_dir)
+    # Get sheet names to find the right sheet
+    sheet_names <- excel_sheets(excel_file)
+    message(paste("Available sheets:", paste(sheet_names, collapse = ", ")))
     
-    # Find the data files (usually Excel or CSV)
-    files <- list.files(temp_dir, pattern = "\\.(xlsx|xls|csv)$", 
-                       recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+    # Find the data sheet (usually the first one or one with "data" in the name)
+    data_sheet <- sheet_names[1] # Default to first sheet
     
-    # Filter for national data files (usually contain "national" in the name)
-    national_files <- files[grepl("national|nat", basename(files), ignore.case = TRUE)]
-    
-    if (length(national_files) == 0) {
-      # If no national files found, look for the main data file
-      # Usually the largest or most comprehensive file
-      national_files <- files[1] # Take the first file as fallback
+    # Look for sheets that likely contain the main data
+    data_keywords <- c("data", "national", "all", "oews", "employment")
+    for (keyword in data_keywords) {
+      matching_sheets <- sheet_names[grepl(keyword, sheet_names, ignore.case = TRUE)]
+      if (length(matching_sheets) > 0) {
+        data_sheet <- matching_sheets[1]
+        break
+      }
     }
     
-    if (length(national_files) > 0) {
-      data_file <- national_files[1] # Take the first national file
+    message(paste("Using sheet:", data_sheet))
+    
+    # Read the Excel file
+    df <- read_excel(excel_file, sheet = data_sheet)
+    
+    if (nrow(df) > 0) {
+      message(paste("Read", nrow(df), "rows from", basename(excel_file)))
       
-      message(paste("Reading file:", basename(data_file)))
+      # Standardize column names
+      df <- standardize_columns(df, year)
       
-      # Read the data file
-      if (grepl("\\.csv$", data_file, ignore.case = TRUE)) {
-        df <- read_csv(data_file, show_col_types = FALSE)
-      } else {
-        # For Excel files, try to read the first sheet
-        df <- read_excel(data_file, sheet = 1)
+      # Clean and convert data types
+      numeric_cols <- c("tot_emp", "jobs_1000", "h_mean", "a_mean", 
+                        "h_pct10", "h_pct25", "h_median", "h_pct75", "h_pct90",
+                        "a_pct10", "a_pct25", "a_median", "a_pct75", "a_pct90")
+      
+      for (col in numeric_cols) {
+        if (col %in% names(df)) {
+          # Remove any non-numeric characters except decimal points and minus signs
+          df[[col]] <- as.numeric(gsub("[^0-9.-]", "", as.character(df[[col]])))
+        }
       }
       
-      if (nrow(df) > 0) {
-        # Standardize column names
-        df <- standardize_columns(df, year)
+      # Remove any existing data for this year to avoid duplicates
+      dbExecute(con, "DELETE FROM oews_data WHERE year = ?", params = list(year))
+      
+      # Insert data in batches
+      batch_size <- 1000
+      n_rows <- nrow(df)
+      
+      for (i in seq(1, n_rows, batch_size)) {
+        end_idx <- min(i + batch_size - 1, n_rows)
+        batch_df <- df[i:end_idx, ]
         
-        # Clean and convert data types
-        numeric_cols <- c("tot_emp", "jobs_1000", "h_mean", "a_mean", 
-                         "h_pct10", "h_pct25", "h_median", "h_pct75", "h_pct90",
-                         "a_pct10", "a_pct25", "a_median", "a_pct75", "a_pct90")
+        dbAppendTable(con, "oews_data", batch_df)
         
-        for (col in numeric_cols) {
-          if (col %in% names(df)) {
-            # Remove any non-numeric characters except decimal points and minus signs
-            df[[col]] <- as.numeric(gsub("[^0-9.-]", "", as.character(df[[col]])))
-          }
+        if (i %% (batch_size * 10) == 1) {
+          message(paste("Inserted", end_idx, "of", n_rows, "rows for year", year))
         }
-        
-        # Remove any existing data for this year to avoid duplicates
-        dbExecute(con, "DELETE FROM oews_data WHERE year = ?", params = list(year))
-        
-        # Insert data in batches
-        batch_size <- 1000
-        n_rows <- nrow(df)
-        
-        for (i in seq(1, n_rows, batch_size)) {
-          end_idx <- min(i + batch_size - 1, n_rows)
-          batch_df <- df[i:end_idx, ]
-          
-          dbAppendTable(con, "oews_data", batch_df)
-          
-          if (i %% (batch_size * 10) == 1) {
-            message(paste("Inserted", end_idx, "of", n_rows, "rows for year", year))
-          }
-        }
-        
-        message(paste("Successfully imported", n_rows, "records for year", year))
-      } else {
-        message(paste("No data found in file for year", year))
       }
+      
+      message(paste("Successfully imported", n_rows, "records for year", year))
+      return(TRUE)
+      
     } else {
-      message(paste("No suitable data files found for year", year))
+      message(paste("No data found in file:", basename(excel_file)))
+      return(FALSE)
     }
     
   }, error = function(e) {
-    message(paste("Error processing year", year, ":", e$message))
-  }, finally = {
-    # Clean up temporary directory
-    if (dir.exists(temp_dir)) {
-      unlink(temp_dir, recursive = TRUE)
-    }
+    message(paste("Error processing file", basename(excel_file), "for year", year, ":", e$message))
+    return(FALSE)
   })
+}
+
+# Function to list and preview files
+preview_files <- function() {
+  excel_files <- list.files(data_dir, pattern = "\\.(xlsx|xls)$", 
+                            full.names = TRUE, ignore.case = TRUE)
+  
+  if (length(excel_files) == 0) {
+    message(paste("No Excel files found in", data_dir))
+    return(data.frame())
+  }
+  
+  # Create a preview dataframe
+  preview_df <- data.frame(
+    filename = basename(excel_files),
+    full_path = excel_files,
+    extracted_year = sapply(excel_files, extract_year_from_filename),
+    file_size_mb = round(file.info(excel_files)$size / 1024 / 1024, 2),
+    stringsAsFactors = FALSE
+  )
+  
+  # Sort by year
+  preview_df <- preview_df[order(preview_df$extracted_year), ]
+  
+  message("Found Excel files:")
+  print(preview_df)
+  
+  return(preview_df)
 }
 
 # Main processing function
 main <- function() {
-  message("Starting BLS OEWS data import process...")
+  message("Starting BLS OEWS data import process (Excel files)...")
+  
+  # Preview files first
+  file_preview <- preview_files()
+  
+  if (nrow(file_preview) == 0) {
+    message("Please place your BLS OEWS Excel files in the 'bls_oews_data' directory")
+    return()
+  }
   
   # Connect to database
   con <- connect_to_db()
@@ -296,43 +348,29 @@ main <- function() {
   # Create table
   create_oews_table(con)
   
-  # Find all zip files in the data directory
-  zip_files <- list.files(data_dir, pattern = "\\.zip$", full.names = TRUE)
+  # Filter out files where we couldn't extract a year
+  valid_files <- file_preview[!is.na(file_preview$extracted_year), ]
   
-  if (length(zip_files) == 0) {
-    message(paste("No zip files found in", data_dir))
-    message("Please download the BLS OEWS zip files and place them in the data directory")
+  if (nrow(valid_files) == 0) {
+    message("Could not extract years from any filenames. Please check file naming.")
     dbDisconnect(con)
     return()
   }
   
-  message(paste("Found", length(zip_files), "zip files"))
+  message(paste("Processing", nrow(valid_files), "files for years:", 
+                paste(valid_files$extracted_year, collapse = ", ")))
   
-  # Extract years from filenames and sort
-  years <- sapply(zip_files, function(x) {
-    # Try to extract 4-digit year from filename
-    year_match <- str_extract(basename(x), "\\d{4}")
-    if (!is.na(year_match)) {
-      as.numeric(year_match)
-    } else {
-      NA
+  # Process each file
+  successful_imports <- 0
+  for (i in 1:nrow(valid_files)) {
+    success <- process_excel_file(
+      valid_files$full_path[i], 
+      valid_files$extracted_year[i], 
+      con
+    )
+    if (success) {
+      successful_imports <- successful_imports + 1
     }
-  })
-  
-  # Filter out files where we couldn't extract a year
-  valid_files <- zip_files[!is.na(years)]
-  valid_years <- years[!is.na(years)]
-  
-  # Sort by year
-  sort_order <- order(valid_years)
-  valid_files <- valid_files[sort_order]
-  valid_years <- valid_years[sort_order]
-  
-  message(paste("Processing years:", paste(valid_years, collapse = ", ")))
-  
-  # Process each year
-  for (i in seq_along(valid_files)) {
-    process_year_data(valid_files[i], valid_years[i], con)
   }
   
   # Summary statistics
@@ -340,8 +378,16 @@ main <- function() {
   years_in_db <- dbGetQuery(con, "SELECT DISTINCT year FROM oews_data ORDER BY year")$year
   
   message("\n=== Import Summary ===")
+  message(paste("Files processed successfully:", successful_imports, "of", nrow(valid_files)))
   message(paste("Total records imported:", total_records))
   message(paste("Years in database:", paste(years_in_db, collapse = ", ")))
+  
+  # Show some sample data
+  if (total_records > 0) {
+    sample_data <- dbGetQuery(con, "SELECT year, occ_code, occ_title, a_mean FROM oews_data WHERE a_mean IS NOT NULL LIMIT 5")
+    message("\nSample data:")
+    print(sample_data)
+  }
   
   # Disconnect from database
   dbDisconnect(con)
@@ -349,12 +395,19 @@ main <- function() {
   message("Import process completed successfully!")
 }
 
+# Helper function to just preview files without importing
+preview_only <- function() {
+  preview_files()
+}
+
 # Run the main function
 if (!interactive()) {
   main()
 } else {
-  message("Script loaded. Run main() to start the import process.")
-  message("Make sure your .Renviron file contains:")
+  message("Script loaded. Available functions:")
+  message("- preview_only(): Preview files without importing")
+  message("- main(): Start the full import process")
+  message("\nMake sure your .Renviron file contains:")
   message("DB_USER=your_username")
   message("DB_PASSWORD=your_password")
   message("DB_NAME=bls_oews  # optional, defaults to bls_oews")
