@@ -17,11 +17,11 @@ if (file.exists(".Renviron")) {
 }
 
 # Database connection parameters from environment variables
-db_host <- Sys.getenv("DB_HOST", default = "mexico.bbfarm.org")
+db_host <- Sys.getenv("DB_HOST")
 db_user <- Sys.getenv("DB_USER")
 db_password <- Sys.getenv("DB_PASSWORD")
-db_name <- Sys.getenv("DB_NAME", default = "bls_oews")
-db_port <- as.numeric(Sys.getenv("DB_PORT", default = "3306"))
+db_name <- Sys.getenv("DB_NAME")
+db_port <- as.numeric(Sys.getenv("DB_PORT"))
 
 # Validate environment variables
 if (db_user == "" || db_password == "") {
